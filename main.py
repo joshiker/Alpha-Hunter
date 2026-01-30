@@ -1,108 +1,99 @@
-import pandas as pd
 import requests
-import io
 import os
 from datetime import datetime, timedelta
 
 # ---------------------------------------------------------
-# 🔐 텔레그램 설정
+# 🔐 설정 로드 (깃허브 금고에서 꺼내옴)
 # ---------------------------------------------------------
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+API_KEY = os.environ.get("FOOTBALL_DATA_TOKEN")
 
 def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ 텔레그램 설정이 없습니다.")
+        return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Error sending telegram: {e}")
+    requests.post(url, json=payload)
 
 def run_alpha_hunter():
-    print("🚀 Alpha Hunter: Stealth Mode (위장 접속 시도)...")
-    
-    # 1. 방화벽 우회를 위한 가짜 신분증(User-Agent) 만들기
-    # 마치 크롬 브라우저로 접속하는 척합니다.
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-    }
-    
-    url = "https://api.clubelo.com/fixtures"
-    
-    try:
-        # timeout=30: 30초 동안 응답 없으면 멈춤
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code != 200:
-            send_telegram(f"⚠️ 접속 거부됨: 상태 코드 {response.status_code}")
-            return
-            
-        # 데이터 읽기
-        df = pd.read_csv(io.StringIO(response.content.decode('utf-8')))
-        
-    except Exception as e:
-        send_telegram(f"⚠️ 데이터 접속 실패 (방화벽): {e}")
+    print("🚀 Alpha Hunter: Official API Mode 가동...")
+
+    if not API_KEY:
+        print("❌ FOOTBALL_DATA_TOKEN이 없습니다. Secrets를 확인하세요.")
         return
 
-    # 2. 날짜 필터링 (오늘 ~ 3일 뒤)
+    # 1. 5대 리그 코드 (PL:프리미어리그, PD:라리가, BL1:분데스리가, SA:세리에A, FL1:리그1)
+    leagues = ['PL', 'PD', 'BL1', 'SA', 'FL1']
+    
+    # 2. 날짜 설정 (오늘 ~ 3일 뒤)
     today = datetime.now().date()
-    end_date = today + timedelta(days=3)
+    date_to = today + timedelta(days=3)
     
-    # 날짜 형식 변환
-    df['Date'] = pd.to_datetime(df['Date']).dt.date
-    
-    # 3. 주요 리그 필터링 (ENG, ESP, GER, ITA, FRA)
-    major_countries = ['ENG', 'ESP', 'GER', 'ITA', 'FRA'] 
-    
-    # 기간 내 + 1부 리그 + 주요 국가
-    upcoming = df[
-        (df['Date'] >= today) & 
-        (df['Date'] <= end_date) &
-        (df['Country'].isin(major_countries)) &
-        (df['Level'] == 1)
-    ].copy()
-    
-    if upcoming.empty:
-        send_telegram(f"💤 {today}~{end_date} 기간에 예정된 주요 경기가 없습니다.")
+    headers = {'X-Auth-Token': API_KEY}
+    all_matches = []
+
+    # 3. 리그별 데이터 수집
+    for league in leagues:
+        url = f"https://api.football-data.org/v4/competitions/{league}/matches"
+        params = {
+            'dateFrom': today.strftime('%Y-%m-%d'),
+            'dateTo': date_to.strftime('%Y-%m-%d')
+        }
+        
+        try:
+            res = requests.get(url, headers=headers, params=params)
+            if res.status_code == 200:
+                data = res.json()
+                matches = data.get('matches', [])
+                all_matches.extend(matches)
+            else:
+                print(f"⚠️ {league} 조회 실패: {res.status_code}")
+        except Exception as e:
+            print(f"에러 발생: {e}")
+
+    if not all_matches:
+        send_telegram(f"💤 {today}~{date_to} 기간에 예정된 5대 리그 경기가 없습니다.")
         return
 
-    report = f"🌍 **Alpha Hunter Report**\n(Source: ClubElo)\n\n"
+    # 4. 리포트 작성
+    report = f"🌍 **Alpha Hunter Official**\n({today} ~ {date_to})\n\n"
     count = 0
     
-    for idx, row in upcoming.iterrows():
-        home = row['Home']
-        away = row['Away']
-        h_elo = row['HomeElo']
-        a_elo = row['AwayElo']
-        country = row['Country']
-        date_str = row['Date'].strftime("%m/%d")
+    # 강팀 리스트 (간단한 파워 랭킹 필터)
+    top_teams = [
+        'Man City', 'Liverpool', 'Arsenal', 'Real Madrid', 'Barcelona', 
+        'Bayern Munich', 'Leverkusen', 'Inter', 'Juventus', 'PSG'
+    ]
+
+    for match in all_matches:
+        home = match['homeTeam']['name']
+        away = match['awayTeam']['name']
+        league_name = match['competition']['name']
+        utc_date = match['utcDate'] # 2026-01-31T15:00:00Z 형식
         
-        # 승률 계산 (ELO 공식)
-        dr = h_elo + 100 - a_elo
-        win_prob = 1 / (10**(dr/400) + 1)
-        prob_pct = (1 - win_prob) * 100
+        # 시간 변환 (UTC -> 한국시간 KST)
+        match_time = datetime.strptime(utc_date, "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
+        time_str = match_time.strftime("%m/%d %H:%M")
         
-        # 추천 기준: 승률 60% 이상
-        if prob_pct >= 60:
+        # 빅매치나 강팀 경기만 알림 (너무 많이 오는 것 방지)
+        is_big_game = any(t in home for t in top_teams) or any(t in away for t in top_teams)
+        
+        if is_big_game:
             count += 1
-            emoji = "🔥" if prob_pct >= 70 else "✅"
-            
-            report += f"{emoji} **[{country}]** {date_str}\n"
+            report += f"🏆 **[{league_name}]**\n"
             report += f"⚽ **{home}** vs {away}\n"
-            report += f"🧠 승률: **{prob_pct:.1f}%** (ELO차: {int(h_elo - a_elo)})\n"
+            report += f"⏰ {time_str} (KST)\n"
             report += "------------------\n"
 
-    # 메시지 전송
+    # 전송
     if count > 0:
-        if len(report) > 4000: report = report[:4000] + "\n...(후략)"
+        if len(report) > 4000: report = report[:4000]
         send_telegram(report)
         print(f"✅ 총 {count}개 경기 전송 완료")
     else:
-        send_telegram(f"📉 분석 완료: {today} 기준 추천 경기가 없습니다.")
+        send_telegram("📉 기간 내 주목할 만한 빅매치가 없습니다.")
 
 if __name__ == "__main__":
     run_alpha_hunter()
